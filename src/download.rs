@@ -82,6 +82,18 @@ pub async fn download(
     media: &Media,
     retries: u32,
 ) -> Result<Outcome> {
+    download_with_progress(client, directory, media, retries, |_, _| {}).await
+}
+
+/// Reports the current file offset (including resumed bytes), which may reset on retry.
+pub async fn download_with_progress(
+    client: &Client,
+    directory: &Path,
+    media: &Media,
+    retries: u32,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<Outcome> {
+    progress(0, media.size);
     fs::create_dir_all(directory).await?;
     let dest = destination(directory, media);
     let receipt_path = dest.with_file_name(format!(
@@ -98,6 +110,7 @@ pub async fn download(
             && fs::metadata(&dest).await?.len() == media.size
             && file_hash(&dest).await? == receipt.sha256
         {
+            progress(media.size, media.size);
             return Ok(Outcome::Skipped);
         }
         anyhow::bail!(
@@ -111,7 +124,7 @@ pub async fn download(
     ));
     let mut last_error = None;
     for attempt in 0..=retries {
-        match transfer(client, media, &part).await {
+        match transfer(client, media, &part, &mut progress).await {
             Ok(()) => {
                 let receipt = Receipt {
                     size: media.size,
@@ -153,13 +166,19 @@ fn range_matches(header: &str, offset: u64, size: u64) -> bool {
         && end.parse::<u64>().ok() == size.checked_sub(1)
 }
 
-async fn transfer(client: &Client, media: &Media, part: &Path) -> Result<()> {
+async fn transfer(
+    client: &Client,
+    media: &Media,
+    part: &Path,
+    progress: &mut impl FnMut(u64, u64),
+) -> Result<()> {
     let mut offset = match fs::metadata(part).await {
         Ok(m) => m.len(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
         Err(e) => return Err(e.into()),
     };
     if offset == media.size {
+        progress(offset, media.size);
         return Ok(());
     }
     if offset > media.size {
@@ -212,6 +231,7 @@ async fn transfer(client: &Client, media: &Media, part: &Path) -> Result<()> {
         .append(offset > 0)
         .open(part)
         .await?;
+    progress(offset, media.size);
     let mut written = offset;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -224,6 +244,7 @@ async fn transfer(client: &Client, media: &Media, part: &Path) -> Result<()> {
         );
         file.write_all(&chunk).await?;
         written += chunk.len() as u64;
+        progress(written, media.size);
     }
     file.flush().await?;
     ensure!(
@@ -298,16 +319,30 @@ mod tests {
         .await
         .unwrap();
         let client = Client::new();
+        let mut updates = Vec::new();
         assert_eq!(
-            download(&client, dir.path(), &m, 0).await.unwrap(),
+            download_with_progress(&client, dir.path(), &m, 0, |bytes, total| {
+                updates.push((bytes, total));
+            })
+            .await
+            .unwrap(),
             Outcome::Downloaded
         );
+        assert_eq!(updates.first(), Some(&(0, 6)));
+        assert!(updates.contains(&(3, 6)), "report resumed bytes");
+        assert_eq!(updates.last(), Some(&(6, 6)));
         thread.join().unwrap();
         assert_eq!(fs::read(&dest).await.unwrap(), b"abcdef");
+        updates.clear();
         assert_eq!(
-            download(&client, dir.path(), &m, 0).await.unwrap(),
+            download_with_progress(&client, dir.path(), &m, 0, |bytes, total| {
+                updates.push((bytes, total));
+            })
+            .await
+            .unwrap(),
             Outcome::Skipped
         );
+        assert_eq!(updates, [(0, 6), (6, 6)]);
         fs::write(&dest, b"broken").await.unwrap();
         assert!(download(&client, dir.path(), &m, 0).await.is_err());
     }
@@ -330,9 +365,20 @@ mod tests {
         )
         .await
         .unwrap();
-        download(&Client::new(), dir.path(), &m, 0).await.unwrap();
+        let mut updates = Vec::new();
+        download_with_progress(&Client::new(), dir.path(), &m, 0, |bytes, total| {
+            updates.push((bytes, total));
+        })
+        .await
+        .unwrap();
         thread.join().unwrap();
         assert_eq!(fs::read(dest).await.unwrap(), b"abcdef");
+        assert_eq!(updates.first(), Some(&(0, 6)));
+        assert!(
+            !updates.contains(&(3, 6)),
+            "ignored Range restarts from zero"
+        );
+        assert_eq!(updates.last(), Some(&(6, 6)));
     }
 
     #[test]

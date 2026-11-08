@@ -16,11 +16,12 @@ path = "src/gui.rs"
 required-features = ["gui"]
 
 [features]
-gui = ["dep:slint", "dep:image"]
+gui = ["dep:slint", "dep:image", "dep:rfd"]
 
 [dependencies]
 anyhow = "1"
 slint = { version = "=1.18.1", optional = true, default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }

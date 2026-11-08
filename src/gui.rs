@@ -2,6 +2,7 @@
 
 #[allow(dead_code)]
 mod auth;
+#[allow(dead_code)]
 mod download;
 mod filter;
 mod photos;
@@ -18,15 +19,16 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 slint::slint! {
-    import { Button, LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
+    import { Button, LineEdit, ComboBox, ScrollView, ProgressIndicator } from "std-widgets.slint";
     export struct PhotoItem { name: string, image: image }
     export component App inherits Window {
         title: "iCloud Download Helper";
-        width: 1000px; height: 700px;
+        preferred-width: 1000px; preferred-height: 720px;
+        min-width: 640px; min-height: 400px;
         in-out property <string> username;
         in-out property <string> region: "com";
         in-out property <string> secret;
@@ -44,66 +46,84 @@ slint::slint! {
         in-out property <bool> needs-secret: false;
         in-out property <bool> code-mode: false;
         in-out property <bool> can-next: false;
+        in-out property <bool> choosing-directory: false;
+        in-out property <bool> progress-visible: false;
+        in-out property <bool> progress-indeterminate: false;
+        in-out property <float> file-progress: 0;
+        in-out property <string> progress-text;
+        in-out property <string> current-file;
+        callback choose-directory();
         callback connect(string, string);
         callback submit-secret(string);
         callback select-album(int);
         callback next-page();
         callback download-album(string, string, string, string);
-        VerticalLayout {
-            padding: 16px; spacing: 10px;
-            Text { text: "iCloud 照片"; font-size: 24px; font-weight: 700; }
-            HorizontalLayout {
-                spacing: 8px;
-                LineEdit { text <=> root.username; placeholder-text: "Apple 账号"; enabled: !root.busy && !root.connected; }
-                ComboBox { model: ["com", "cn"]; current-value <=> root.region; enabled: !root.busy && !root.connected; }
-                Button { text: "连接"; enabled: !root.busy && !root.connected; clicked => { root.connect(root.username, root.region); } }
-            }
-            if root.needs-secret: HorizontalLayout {
-                spacing: 8px;
-                LineEdit { text <=> root.secret; placeholder-text: root.code-mode ? "六位验证码" : "Apple 账号密码"; input-type: root.code-mode ? InputType.number : InputType.password; accepted => { root.submit-secret(root.secret); root.secret = ""; } }
-                Button { text: root.code-mode ? "验证" : "登录"; clicked => { root.submit-secret(root.secret); root.secret = ""; } }
-            }
-            Text { text: root.status; wrap: word-wrap; color: #526177; }
-            HorizontalLayout {
-                spacing: 12px;
-                VerticalLayout {
-                    width: 220px; spacing: 6px;
-                    Text { text: "相册"; font-weight: 700; }
-                    ScrollView {
-                        VerticalLayout {
-                            for album[index] in root.albums: Button {
-                                text: album; enabled: root.connected && !root.downloading;
-                                clicked => { root.select-album(index); }
+        // Keep controls reachable when the compositor constrains the window height.
+        ScrollView {
+            VerticalLayout {
+                padding: 16px; spacing: 10px;
+                Text { text: "iCloud 照片"; font-size: 24px; font-weight: 700; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { text <=> root.username; placeholder-text: "Apple 账号"; enabled: !root.busy && !root.connected; }
+                    ComboBox { width: 80px; model: ["com", "cn"]; current-value <=> root.region; enabled: !root.busy && !root.connected; }
+                    Button { text: "连接"; enabled: !root.busy && !root.connected; clicked => { root.connect(root.username, root.region); } }
+                }
+                if root.needs-secret: HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { text <=> root.secret; placeholder-text: root.code-mode ? "六位验证码" : "Apple 账号密码"; input-type: root.code-mode ? InputType.number : InputType.password; accepted => { root.submit-secret(root.secret); root.secret = ""; } }
+                    Button { text: root.code-mode ? "验证" : "登录"; clicked => { root.submit-secret(root.secret); root.secret = ""; } }
+                }
+                Text { text: root.status; wrap: word-wrap; color: #526177; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    min-height: 220px; vertical-stretch: 1;
+                    VerticalLayout {
+                        width: 200px; spacing: 6px;
+                        Text { text: "相册"; font-weight: 700; }
+                        ScrollView {
+                            VerticalLayout {
+                                for album[index] in root.albums: Button {
+                                    text: album; enabled: root.connected && !root.downloading;
+                                    clicked => { root.select-album(index); }
+                                }
                             }
                         }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1; spacing: 8px;
+                        Text { text: root.selected; font-size: 18px; font-weight: 700; wrap: word-wrap; }
+                        ScrollView {
+                            VerticalLayout {
+                                spacing: 8px;
+                                for photo in root.photos: HorizontalLayout {
+                                    height: 112px; spacing: 12px;
+                                    Image { source: photo.image; width: 150px; height: 108px; image-fit: contain; }
+                                    Text { text: photo.name; vertical-alignment: center; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                        Button { text: "下一页"; enabled: root.can-next && !root.busy; clicked => { root.next-page(); } }
                     }
                 }
-                VerticalLayout {
+                Text { text: "按拍摄日期筛选（UTC，包含起止日期）；留空不限"; color: #526177; wrap: word-wrap; }
+                HorizontalLayout {
                     spacing: 8px;
-                    Text { text: root.selected; font-size: 18px; font-weight: 700; }
-                    ScrollView {
-                        VerticalLayout {
-                            spacing: 8px;
-                            for photo in root.photos: HorizontalLayout {
-                                height: 112px; spacing: 12px;
-                                Image { source: photo.image; width: 150px; height: 108px; image-fit: contain; }
-                                Text { text: photo.name; vertical-alignment: center; wrap: word-wrap; }
-                            }
-                        }
-                    }
-                    Button { text: "下一页"; enabled: root.can-next && !root.busy; clicked => { root.next-page(); } }
-                    Text { text: "按拍摄日期筛选（UTC，包含起止日期）；留空不限"; color: #526177; }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        LineEdit { text <=> root.date-from; placeholder-text: "开始 YYYY-MM-DD"; enabled: !root.downloading; }
-                        LineEdit { text <=> root.date-to; placeholder-text: "结束 YYYY-MM-DD"; enabled: !root.downloading; }
-                        LineEdit { text <=> root.file-limit; placeholder-text: "文件数量上限"; input-type: InputType.number; enabled: !root.downloading; }
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        LineEdit { text <=> root.directory; placeholder-text: "下载目录"; }
-                        Button { text: "下载此相册"; enabled: root.connected && !root.busy && root.selected != "选择相册"; clicked => { root.download-album(root.directory, root.date-from, root.date-to, root.file-limit); } }
-                    }
+                    LineEdit { text <=> root.date-from; placeholder-text: "开始 YYYY-MM-DD"; enabled: !root.downloading; }
+                    LineEdit { text <=> root.date-to; placeholder-text: "结束 YYYY-MM-DD"; enabled: !root.downloading; }
+                    LineEdit { text <=> root.file-limit; placeholder-text: "文件数量上限"; input-type: InputType.number; enabled: !root.downloading; }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { text <=> root.directory; placeholder-text: "下载目录"; enabled: !root.downloading && !root.choosing-directory; }
+                    Button { text: "选择文件夹…"; enabled: !root.downloading && !root.choosing-directory; clicked => { root.choose-directory(); } }
+                    Button { text: "下载此相册"; enabled: root.connected && !root.busy && !root.choosing-directory && root.selected != "选择相册"; clicked => { root.download-album(root.directory, root.date-from, root.date-to, root.file-limit); } }
+                }
+                if root.progress-visible: VerticalLayout {
+                    spacing: 6px;
+                    Text { text: root.progress-text; wrap: word-wrap; }
+                    Text { text: root.current-file; wrap: word-wrap; color: #526177; }
+                    if root.downloading: ProgressIndicator { progress: root.file-progress; indeterminate: root.progress-indeterminate; }
                 }
             }
         }
@@ -125,6 +145,36 @@ fn status(ui: &slint::Weak<App>, message: String, busy: bool) {
 
 fn main() -> Result<()> {
     let app = App::new()?;
+    let ui = app.as_weak();
+    app.on_choose_directory(move || {
+        let Some(app) = ui.upgrade() else { return };
+        app.set_choosing_directory(true);
+        let directory = PathBuf::from(app.get_directory().as_str());
+        let ui = ui.clone();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new().map(|rt| {
+                rt.block_on(async {
+                    rfd::AsyncFileDialog::new()
+                        .set_title("选择下载位置")
+                        .set_directory(directory)
+                        .pick_folder()
+                        .await
+                })
+            });
+            let _ = ui.upgrade_in_event_loop(move |app| {
+                app.set_choosing_directory(false);
+                match result {
+                    Ok(Some(folder)) => {
+                        app.set_directory(folder.path().to_string_lossy().as_ref().into())
+                    }
+                    Ok(None) => {}
+                    Err(error) => app.set_status(
+                        format!("无法打开文件夹选择器：{error}；可手动填写目录").into(),
+                    ),
+                }
+            });
+        });
+    });
     let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
     let generation = Arc::new(AtomicU64::new(0));
     let (secret_tx, secret_rx) = mpsc::channel::<String>();
@@ -212,7 +262,16 @@ fn main() -> Result<()> {
                 return;
             }
         };
+        if dir.trim().is_empty() {
+            status(&ui, "请输入下载目录或选择文件夹".into(), false);
+            return;
+        }
         if let Some(app) = ui.upgrade() {
+            app.set_progress_visible(true);
+            app.set_progress_indeterminate(true);
+            app.set_file_progress(0.0);
+            app.set_progress_text("正在读取相册…".into());
+            app.set_current_file("".into());
             app.set_downloading(true);
         }
         status(&ui, "正在下载相册…".into(), true);
@@ -324,8 +383,14 @@ async fn worker(
                     }
                     None => Err(anyhow::anyhow!("请选择相册")),
                 };
-                let _ = ui.upgrade_in_event_loop(|app| app.set_downloading(false));
+                let _ = ui.upgrade_in_event_loop(|app| {
+                    app.set_downloading(false);
+                    app.set_progress_indeterminate(false);
+                });
                 if let Err(e) = result {
+                    let _ = ui.upgrade_in_event_loop(|app| {
+                        app.set_progress_text("下载已中止".into());
+                    });
                     status(&ui, format!("错误：{e:#}"), false);
                 }
             }
@@ -470,9 +535,14 @@ async fn download_album(
     let mut offset = 0;
     let mut seen = HashSet::new();
     let mut done = 0;
+    let mut skipped = 0;
     let mut failed = 0;
     let mut last_error = String::new();
     loop {
+        let _ = ui.upgrade_in_event_loop(move |app| {
+            app.set_progress_indeterminate(true);
+            app.set_current_file("正在读取下一批文件…".into());
+        });
         let page = photos.page(Some(album), offset, false).await?;
         if page.empty {
             break;
@@ -491,16 +561,59 @@ async fn download_album(
             if !filter.select(&item)? {
                 continue;
             }
-            match download::download(client, &dir, &item, 3).await {
-                Ok(_) => done += 1,
+            let name = item.filename.clone();
+            let progress_ui = ui.clone();
+            let mut last_update = None;
+            let result =
+                download::download_with_progress(client, &dir, &item, 3, move |bytes, total| {
+                    let now = Instant::now();
+                    if bytes != 0
+                        && bytes != total
+                        && last_update.is_some_and(|last: Instant| {
+                            now.duration_since(last) < Duration::from_millis(100)
+                        })
+                    {
+                        return;
+                    }
+                    last_update = Some(now);
+                    let name = name.clone();
+                    let _ = progress_ui.upgrade_in_event_loop(move |app| {
+                        let fraction = if total == 0 {
+                            1.0
+                        } else {
+                            bytes as f64 / total as f64
+                        };
+                        app.set_progress_indeterminate(false);
+                        app.set_file_progress(fraction as f32);
+                        app.set_progress_text(
+                            format!("已下载 {done}，已存在 {skipped}，失败 {failed}").into(),
+                        );
+                        app.set_current_file(
+                            format!(
+                                "当前文件：{name} — {:.1}%（{bytes} / {total} 字节）",
+                                fraction * 100.0
+                            )
+                            .into(),
+                        );
+                    });
+                })
+                .await;
+            match result {
+                Ok(download::Outcome::Downloaded) => done += 1,
+                Ok(download::Outcome::Skipped) => skipped += 1,
                 Err(e) => {
                     failed += 1;
                     last_error = format!("；最近失败 {}：{e:#}", item.filename);
                 }
             }
+            let _ = ui.upgrade_in_event_loop(move |app| {
+                app.set_progress_text(
+                    format!("已下载 {done}，已存在 {skipped}，失败 {failed}").into(),
+                );
+            });
             status(
                 ui,
-                format!("下载中：完成或已存在 {done}，失败 {failed}"),
+                format!("下载中：已下载 {done}，已存在 {skipped}，失败 {failed}"),
                 true,
             );
         }
@@ -508,10 +621,18 @@ async fn download_album(
             break;
         }
     }
+    let _ = ui.upgrade_in_event_loop(move |app| {
+        app.set_progress_indeterminate(false);
+        app.set_file_progress(0.0);
+        app.set_current_file("".into());
+        app.set_progress_text(
+            format!("下载结束：已下载 {done}，已存在 {skipped}，失败 {failed}").into(),
+        );
+    });
     status(
         ui,
         format!(
-            "下载结束：完成或已存在 {done}，失败 {failed}；目录：{}",
+            "下载结束：已下载 {done}，已存在 {skipped}，失败 {failed}；目录：{}",
             dir.display()
         ) + &last_error,
         false,
