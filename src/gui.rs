@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 mod auth;
 mod download;
+mod filter;
 mod photos;
 mod srp;
 
@@ -28,6 +29,9 @@ slint::slint! {
         in-out property <string> region: "com";
         in-out property <string> secret;
         in-out property <string> directory: "./photos";
+        in-out property <string> date_from;
+        in-out property <string> date_to;
+        in-out property <string> file_limit;
         in-out property <string> status: "输入账号并连接 iCloud";
         in-out property <string> selected: "选择相册";
         in-out property <[string]> albums;
@@ -42,7 +46,7 @@ slint::slint! {
         callback submit-secret(string);
         callback select-album(int);
         callback next-page();
-        callback download-album(string);
+        callback download-album(string, string, string, string);
         VerticalLayout {
             padding: 16px; spacing: 10px;
             Text { text: "iCloud 照片"; font-size: 24px; font-weight: 700; }
@@ -86,10 +90,17 @@ slint::slint! {
                         }
                     }
                     Button { text: "下一页"; enabled: root.can-next && !root.busy; clicked => { root.next-page(); } }
+                    Text { text: "按拍摄日期筛选（UTC，包含起止日期）；留空不限"; color: #526177; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit { text <=> root.date-from; placeholder-text: "开始 YYYY-MM-DD"; enabled: !root.downloading; }
+                        LineEdit { text <=> root.date-to; placeholder-text: "结束 YYYY-MM-DD"; enabled: !root.downloading; }
+                        LineEdit { text <=> root.file-limit; placeholder-text: "文件数量上限"; input-type: InputType.number; enabled: !root.downloading; }
+                    }
                     HorizontalLayout {
                         spacing: 8px;
                         LineEdit { text <=> root.directory; placeholder-text: "下载目录"; }
-                        Button { text: "下载此相册"; enabled: root.connected && !root.busy && root.selected != "选择相册"; clicked => { root.download-album(root.directory); } }
+                        Button { text: "下载此相册"; enabled: root.connected && !root.busy && root.selected != "选择相册"; clicked => { root.download-album(root.directory, root.date-from, root.date-to, root.file-limit); } }
                     }
                 }
             }
@@ -100,7 +111,7 @@ slint::slint! {
 enum Command {
     Select(usize, u64),
     Next(u64),
-    Download(PathBuf),
+    Download(PathBuf, filter::DownloadFilter),
 }
 
 fn status(ui: &slint::Weak<App>, message: String, busy: bool) {
@@ -188,12 +199,22 @@ fn main() -> Result<()> {
         let _ = tx.send(Command::Next(current));
     });
     let ui = weak.clone();
-    app.on_download_album(move |dir| {
+    app.on_download_album(move |dir, start, end, limit| {
+        let filter = match filter::DownloadFilter::new(start.as_str(), end.as_str(), limit.as_str())
+        {
+            Ok(filter) => filter,
+            Err(error) => {
+                if let Some(app) = ui.upgrade() {
+                    app.set_status(format!("错误：{error:#}").into());
+                }
+                return;
+            }
+        };
         if let Some(app) = ui.upgrade() {
             app.set_downloading(true);
         }
         status(&ui, "正在下载相册…".into(), true);
-        let _ = commands_tx.send(Command::Download(PathBuf::from(dir.as_str())));
+        let _ = commands_tx.send(Command::Download(PathBuf::from(dir.as_str()), filter));
     });
     app.run()?;
     Ok(())
@@ -294,9 +315,11 @@ async fn worker(
                     }
                 }
             }
-            Command::Download(dir) => {
+            Command::Download(dir, filter) => {
                 let result = match selected {
-                    Some(index) => download_album(&ui, &photos, &client, &albums[index], dir).await,
+                    Some(index) => {
+                        download_album(&ui, &photos, &client, &albums[index], dir, filter).await
+                    }
                     None => Err(anyhow::anyhow!("请选择相册")),
                 };
                 let _ = ui.upgrade_in_event_loop(|app| app.set_downloading(false));
@@ -426,6 +449,7 @@ async fn download_album(
     client: &reqwest::Client,
     album: &photos::Album,
     directory: PathBuf,
+    mut filter: filter::DownloadFilter,
 ) -> Result<()> {
     ensure!(!directory.as_os_str().is_empty(), "请输入下载目录");
     std::fs::create_dir_all(&directory)?;
@@ -459,6 +483,12 @@ async fn download_album(
             .collect();
         ensure!(!media.is_empty(), "Apple 分页没有前进");
         for item in media {
+            if filter.full() {
+                break;
+            }
+            if !filter.select(&item)? {
+                continue;
+            }
             match download::download(client, &dir, &item, 3).await {
                 Ok(_) => done += 1,
                 Err(e) => {
@@ -471,6 +501,9 @@ async fn download_album(
                 format!("下载中：完成或已存在 {done}，失败 {failed}"),
                 true,
             );
+        }
+        if filter.full() {
+            break;
         }
     }
     status(

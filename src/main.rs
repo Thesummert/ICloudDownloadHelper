@@ -1,5 +1,6 @@
 mod auth;
 mod download;
+mod filter;
 mod photos;
 mod srp;
 
@@ -82,6 +83,12 @@ struct DownloadArgs {
     live: bool,
     #[arg(long, help = "仅列出计划下载的文件，不创建下载目录或下载媒体")]
     dry_run: bool,
+    #[arg(long, help = "拍摄日期起始日（UTC，YYYY-MM-DD，含当天）")]
+    from: Option<String>,
+    #[arg(long, help = "拍摄日期结束日（UTC，YYYY-MM-DD，含当天）")]
+    to: Option<String>,
+    #[arg(long, help = "本次最多选择的文件数，包含已存在和失败的文件")]
+    limit: Option<String>,
 }
 
 #[derive(Default)]
@@ -107,6 +114,14 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let mut filter = match &cli.command {
+        Command::Download(args) => Some(filter::DownloadFilter::new(
+            args.from.as_deref().unwrap_or(""),
+            args.to.as_deref().unwrap_or(""),
+            args.limit.as_deref().unwrap_or(""),
+        )?),
+        _ => None,
+    };
     let username = match cli.username {
         Some(u) => u,
         None => auth::prompt("Apple 账号邮箱/手机号")?,
@@ -173,7 +188,7 @@ async fn run(cli: Cli) -> Result<()> {
         .read_timeout(Duration::from_secs(120))
         .build()?;
     let mut counts = Counts::default();
-    for album in selected {
+    'albums: for album in selected {
         let (label, dir) = match &album {
             Some(a) => (
                 a.name.clone(),
@@ -206,6 +221,18 @@ async fn run(cli: Cli) -> Result<()> {
                 .filter(|m| seen.insert(m.id.clone()))
                 .collect();
             ensure!(!media.is_empty(), "Apple 分页没有前进，停止以避免重复下载");
+            let filter = filter.as_mut().expect("download filter exists");
+            let mut selected_media = Vec::new();
+            for item in media {
+                if filter.full() {
+                    break;
+                }
+                if filter.select(&item)? {
+                    selected_media.push(item);
+                }
+            }
+            let media = selected_media;
+            let full = filter.full();
             if args.dry_run {
                 for m in media {
                     println!(
@@ -213,6 +240,9 @@ async fn run(cli: Cli) -> Result<()> {
                         download::destination(&dir, &m).display(),
                         m.size
                     );
+                }
+                if full {
+                    break 'albums;
                 }
                 continue;
             }
@@ -235,6 +265,10 @@ async fn run(cli: Cli) -> Result<()> {
                     "{label}：完成 {}，跳过 {}，失败 {}",
                     counts.downloaded, counts.skipped, counts.failed
                 ));
+            }
+            if full {
+                bar.finish_and_clear();
+                break 'albums;
             }
         }
         bar.finish_and_clear();

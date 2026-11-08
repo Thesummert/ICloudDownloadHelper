@@ -36,7 +36,7 @@ cargo install --path . --locked --bin icloud-dl
 cargo run --release --locked --features gui --bin icloud-dl-gui
 ```
 
-输入 Apple 账号、选择 `com` 或 `cn` 并连接；需要时在窗口中输入密码和受信任设备验证码。选择相册后加载一页预览，点击“下一页”继续，预览加载期间可以直接切换到其他相册；底部可填写下载目录并下载当前相册。图形下载沿用命令行的会话、文件锁、续传和校验规则，当前按文件顺序下载，不包含 Live Photo 的伴随视频。预览使用 Apple 提供的缩略图，缺少预览资源时只显示文件名；视频不支持播放。界面不保存密码。
+输入 Apple 账号、选择 `com` 或 `cn` 并连接；需要时在窗口中输入密码和受信任设备验证码。选择相册后加载一页预览，点击“下一页”继续，预览加载期间可以直接切换到其他相册；底部可填写下载目录并下载当前相册。可选填拍摄日期起止和文件数量上限，日期按 UTC 自然日计算，包含起止日。数量按文件计数，已存在或下载失败的文件也占用额度；留空表示不限。缺少拍摄日期时，按日期筛选会报错并停止。图形下载沿用命令行的会话、文件锁、续传和校验规则，当前按文件顺序下载，不包含 Live Photo 的伴随视频。预览使用 Apple 提供的缩略图，缺少预览资源时只显示文件名；视频不支持播放。界面不保存密码。
 
 图形界面依赖 Slint，其许可条款与本项目 MIT 许可不同；分发带图形界面的程序前请确认适用的 [Slint 许可](https://slint.dev/pricing)。
 
@@ -60,6 +60,9 @@ icloud-dl -u you@example.com download -a "旅行" -a "家人" -d "./photos" --li
 # 不提供 -a 或 --all 时，终端列出相册，输入序号选择
 icloud-dl -u you@example.com download -d "./photos"
 
+# 按 UTC 拍摄日期筛选，最多选择 100 个文件
+icloud-dl -u you@example.com download -a "旅行" -d "./photos" --from 2024-01-01 --to 2024-12-31 --limit 100
+
 # 下载整个个人照片库，不含隐藏和最近删除
 icloud-dl -u you@example.com download --all -d "./photos" -j 16
 
@@ -76,6 +79,8 @@ icloud-dl -u you@example.com --domain cn download -a "旅行" -d "./photos" -j 8
 两种区域均使用 `idmsa.apple.com` 完成 Apple 账号认证；`--domain cn` 选择中国大陆的 iCloud 网页和数据服务（`icloud.com.cn`）。若旧版本在 `SRP 初始化` 阶段返回 HTTP 404，请重新编译并使用新程序，不必把中国大陆账号改为 `--domain com`。端点划分参考 [PyiCloud 的实现](https://pyicloud.readthedocs.io/en/latest/api/pyicloud-service/)。
 
 若旧版本显示 `https://www.apple.com/filenotfound`，是认证请求未声明接受 JSON 后，重定向掩盖了原始响应。新版为认证请求设置 `Accept: application/json, text/javascript` 和 `Content-Type: application/json`；遇到认证重定向会显示原始状态码及地址，不再自动跟随。认证与数据客户端共享会话 cookie。
+
+`--from`、`--to` 和 `--limit` 均可单独使用。日期是 iCloud 的拍摄日期（UTC），包含所填日期的全天；如果某个文件缺少拍摄日期，按日期筛选时会报错停止。数量上限跨所有选定相册生效，按 iCloud 返回的日期顺序选取文件；已存在、下载失败和 `--dry-run` 中列出的文件均计入上限。启用 `--live` 时伴随视频也单独计数，达到上限时可能只选中照片。
 
 Windows PowerShell 中可用 `-d "D:\Photos\iCloud"`。同名相册必须使用 `albums` 输出的 ID 精确选择。
 

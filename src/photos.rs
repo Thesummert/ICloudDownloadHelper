@@ -2,7 +2,7 @@ use crate::auth::{Session, checked_json};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct Album {
@@ -17,6 +17,7 @@ pub struct Media {
     pub url: String,
     pub size: u64,
     pub fingerprint: String,
+    pub asset_date_ms: Option<i64>,
     #[allow(dead_code)]
     pub preview_url: Option<String>,
 }
@@ -160,7 +161,7 @@ impl<'a> Photos<'a> {
             "CPLAssetAndMasterByAssetDateWithoutHiddenOrDeleted"
         };
         let data = self.query(&json!({"query":{"recordType":kind,"filterBy":filter},"resultsLimit":200,
-            "desiredKeys":["filenameEnc","resOriginalRes","resOriginalFileType","resOriginalVidComplRes","resOriginalVidComplFileType","itemType","masterRef","resJPEGThumbRes","resJPEGMedRes","resVidSmallRes"],
+            "desiredKeys":["filenameEnc","resOriginalRes","resOriginalFileType","resOriginalVidComplRes","resOriginalVidComplFileType","itemType","masterRef","assetDate","resJPEGThumbRes","resJPEGMedRes","resVidSmallRes"],
             "zoneID":{"zoneName":"PrimarySync"}})).await?;
         parse_page(&data, live)
     }
@@ -173,6 +174,15 @@ fn parse_page(data: &Value, live: bool) -> Result<Page> {
         masters: 0,
         empty: records.is_empty(),
     };
+    let mut dates = HashMap::new();
+    for record in records {
+        if record["recordType"] == "CPLAsset"
+            && let Some(id) = field(record, "masterRef")["recordName"].as_str()
+            && let Some(date) = field(record, "assetDate").as_i64()
+        {
+            dates.insert(id, date);
+        }
+    }
     for record in records {
         ensure!(
             record.get("serverErrorCode").is_none(),
@@ -186,11 +196,13 @@ fn parse_page(data: &Value, live: bool) -> Result<Page> {
             .as_str()
             .context("照片缺少 recordName")?;
         let name = decode_name(record, "filenameEnc").context("照片缺少有效原始文件名")?;
+        let date = dates.get(id).copied();
         result.media.push(parse_resource(
             record,
             "resOriginalRes",
             id.into(),
             name.clone(),
+            date,
         )?);
         if live && !field(record, "resOriginalVidComplRes").is_null() {
             let stem = std::path::Path::new(&name)
@@ -202,6 +214,7 @@ fn parse_page(data: &Value, live: bool) -> Result<Page> {
                 "resOriginalVidComplRes",
                 format!("{id}:live"),
                 format!("{stem}_LIVE.MOV"),
+                date,
             )?);
         }
     }
@@ -212,7 +225,13 @@ fn parse_page(data: &Value, live: bool) -> Result<Page> {
     Ok(result)
 }
 
-fn parse_resource(record: &Value, key: &str, id: String, filename: String) -> Result<Media> {
+fn parse_resource(
+    record: &Value,
+    key: &str,
+    id: String,
+    filename: String,
+    asset_date_ms: Option<i64>,
+) -> Result<Media> {
     let resource = field(record, key);
     let url = resource["downloadURL"]
         .as_str()
@@ -229,6 +248,7 @@ fn parse_resource(record: &Value, key: &str, id: String, filename: String) -> Re
         url: url.into(),
         size,
         fingerprint: resource["fileChecksum"].as_str().unwrap_or("").into(),
+        asset_date_ms,
         preview_url: ["resJPEGThumbRes", "resJPEGMedRes", "resVidSmallRes"]
             .iter()
             .filter_map(|key| field(record, key)["downloadURL"].as_str())
@@ -240,6 +260,30 @@ fn parse_resource(record: &Value, key: &str, id: String, filename: String) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn joins_asset_dates_by_master_reference_in_any_record_order() {
+        let data = json!({"records": [
+            {"recordType":"CPLMaster", "recordName":"one", "fields":{
+                "filenameEnc":{"value": B64.encode("a.jpg")},
+                "resOriginalRes":{"value":{"downloadURL":"https://example.com/a","size":1}},
+                "resOriginalVidComplRes":{"value":{"downloadURL":"https://example.com/live","size":2}}
+            }},
+            {"recordType":"CPLAsset", "fields":{"masterRef":{"value":{"recordName":"two"}},"assetDate":{"value": 2000}}},
+            {"recordType":"CPLAsset", "fields":{"masterRef":{"value":{"recordName":"one"}},"assetDate":{"value": 1000}}},
+            {"recordType":"CPLMaster", "recordName":"two", "fields":{
+                "filenameEnc":{"value": B64.encode("b.jpg")},
+                "resOriginalRes":{"value":{"downloadURL":"https://example.com/b","size":1}}
+            }}
+        ]});
+        let page = parse_page(&data, true).unwrap();
+        assert_eq!(
+            page.media
+                .iter()
+                .map(|m| m.asset_date_ms)
+                .collect::<Vec<_>>(),
+            vec![Some(1000), Some(1000), Some(2000)]
+        );
+    }
     #[test]
     fn parses_original_and_live_and_rejects_missing_original() {
         let mut page = json!({"records":[{"recordType":"CPLAsset"},{"recordType":"CPLMaster","recordName":"id", "fields":{

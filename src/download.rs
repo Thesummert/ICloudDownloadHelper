@@ -274,6 +274,7 @@ mod tests {
             url,
             size: 6,
             fingerprint: "v1".into(),
+            asset_date_ms: None,
             preview_url: None,
         }
     }

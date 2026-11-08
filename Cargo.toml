@@ -23,6 +23,7 @@ anyhow = "1"
 slint = { version = "=1.18.1", optional = true, default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 dialoguer = "0.12"
 directories = "6"
