@@ -17,6 +17,8 @@ pub struct Media {
     pub url: String,
     pub size: u64,
     pub fingerprint: String,
+    #[allow(dead_code)]
+    pub preview_url: Option<String>,
 }
 
 pub struct Page {
@@ -158,7 +160,7 @@ impl<'a> Photos<'a> {
             "CPLAssetAndMasterByAssetDateWithoutHiddenOrDeleted"
         };
         let data = self.query(&json!({"query":{"recordType":kind,"filterBy":filter},"resultsLimit":200,
-            "desiredKeys":["filenameEnc","resOriginalRes","resOriginalFileType","resOriginalVidComplRes","resOriginalVidComplFileType","itemType","masterRef"],
+            "desiredKeys":["filenameEnc","resOriginalRes","resOriginalFileType","resOriginalVidComplRes","resOriginalVidComplFileType","itemType","masterRef","resJPEGThumbRes","resJPEGMedRes","resVidSmallRes"],
             "zoneID":{"zoneName":"PrimarySync"}})).await?;
         parse_page(&data, live)
     }
@@ -227,6 +229,11 @@ fn parse_resource(record: &Value, key: &str, id: String, filename: String) -> Re
         url: url.into(),
         size,
         fingerprint: resource["fileChecksum"].as_str().unwrap_or("").into(),
+        preview_url: ["resJPEGThumbRes", "resJPEGMedRes", "resVidSmallRes"]
+            .iter()
+            .filter_map(|key| field(record, key)["downloadURL"].as_str())
+            .find(|url| reqwest::Url::parse(url).is_ok_and(|url| url.scheme() == "https"))
+            .map(str::to_owned),
     })
 }
 
@@ -238,12 +245,24 @@ mod tests {
         let mut page = json!({"records":[{"recordType":"CPLAsset"},{"recordType":"CPLMaster","recordName":"id", "fields":{
             "filenameEnc":{"value":B64.encode("旅行.HEIC")},
             "resOriginalRes":{"value":{"downloadURL":"https://example.com/a","size":12}},
-            "resOriginalVidComplRes":{"value":{"downloadURL":"https://example.com/b","size":24}}
+            "resOriginalVidComplRes":{"value":{"downloadURL":"https://example.com/b","size":24}},
+            "resJPEGThumbRes":{"value":{"downloadURL":"https://example.com/thumb"}}
         }}]});
         let parsed = parse_page(&page, true).unwrap();
         assert_eq!(parsed.masters, 1);
         assert_eq!(parsed.media.len(), 2);
         assert_eq!(parsed.media[0].filename, "旅行.HEIC");
+        assert_eq!(
+            parsed.media[0].preview_url.as_deref(),
+            Some("https://example.com/thumb")
+        );
+        page["records"][1]["fields"]["resJPEGThumbRes"]["value"]["downloadURL"] =
+            json!("http://example.com/thumb");
+        assert!(
+            parse_page(&page, false).unwrap().media[0]
+                .preview_url
+                .is_none()
+        );
         assert_eq!(parsed.media[1].filename, "旅行_LIVE.MOV");
         page["records"][1]["fields"]["resOriginalRes"] = Value::Null;
         assert!(parse_page(&page, true).is_err());

@@ -2,7 +2,7 @@
 name = "icloud-download-helper"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 description = "跨平台 iCloud 照片并发下载工具"
 license = "MIT"
 
@@ -10,8 +10,18 @@ license = "MIT"
 name = "icloud-dl"
 path = "src/main.rs"
 
+[[bin]]
+name = "icloud-dl-gui"
+path = "src/gui.rs"
+required-features = ["gui"]
+
+[features]
+gui = ["dep:slint", "dep:image"]
+
 [dependencies]
 anyhow = "1"
+slint = { version = "=1.18.1", optional = true, default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 dialoguer = "0.12"

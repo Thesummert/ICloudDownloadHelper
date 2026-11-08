@@ -33,6 +33,12 @@ struct Tokens {
     headers: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy)]
+pub enum AuthInput {
+    Password,
+    Code,
+}
+
 pub struct Session {
     pub client: Client,
     auth_client: Client,
@@ -250,6 +256,37 @@ impl Session {
     }
 
     pub async fn login(&mut self, fresh: bool) -> Result<Value> {
+        self.login_with(
+            fresh,
+            std::env::var_os("ICLOUD_2FA_CODE").is_none(),
+            |kind| match kind {
+                AuthInput::Password => Ok(match std::env::var("ICLOUD_PASSWORD") {
+                    Ok(v) => v,
+                    Err(_) => {
+                        ensure!(
+                            io::stdin().is_terminal(),
+                            "请在终端输入密码，或设置 ICLOUD_PASSWORD"
+                        );
+                        dialoguer::Password::new()
+                            .with_prompt("Apple 账号密码（非 App 专用密码）")
+                            .interact()?
+                    }
+                }),
+                AuthInput::Code => match std::env::var("ICLOUD_2FA_CODE") {
+                    Ok(v) => Ok(v),
+                    Err(_) => prompt("六位验证码"),
+                },
+            },
+        )
+        .await
+    }
+
+    pub async fn login_with(
+        &mut self,
+        fresh: bool,
+        request_code: bool,
+        mut input: impl FnMut(AuthInput) -> Result<String>,
+    ) -> Result<Value> {
         if !fresh && self.tokens.headers.contains_key("x-apple-session-token") {
             match self.account_login().await {
                 Ok(data) if !requires_2fa(&data) => {
@@ -263,18 +300,7 @@ impl Session {
         self.tokens
             .headers
             .retain(|k, _| k == "x-apple-twosv-trust-token");
-        let password = Zeroizing::new(match std::env::var("ICLOUD_PASSWORD") {
-            Ok(v) => v,
-            Err(_) => {
-                ensure!(
-                    io::stdin().is_terminal(),
-                    "请在终端输入密码，或设置 ICLOUD_PASSWORD"
-                );
-                dialoguer::Password::new()
-                    .with_prompt("Apple 账号密码（非 App 专用密码）")
-                    .interact()?
-            }
-        });
+        let password = Zeroizing::new(input(AuthInput::Password)?);
         ensure!(!password.is_empty(), "密码不能为空");
         let srp = Srp::new();
         let init = self.auth_request(Method::POST, "signin/init", Some(json!({"a":srp.public_key(),"accountName": self.tokens.username,"protocols":["s2k","s2k_fo"]}))).await?;
@@ -306,20 +332,17 @@ impl Session {
         let mut data = self.account_login().await?;
         if challenge_required || requires_2fa(&data) {
             eprintln!("请在受信任的 Apple 设备上允许登录，并输入六位验证码。");
-            let code = match std::env::var("ICLOUD_2FA_CODE") {
-                Ok(code) => code,
-                Err(_) => {
-                    let response = self
-                        .auth_request(Method::PUT, "verify/trusteddevice/securitycode", None)
-                        .await?;
-                    ensure!(
-                        response.status().is_success(),
-                        "请求验证码失败（HTTP {}）",
-                        response.status().as_u16()
-                    );
-                    prompt("六位验证码")?
-                }
-            };
+            if request_code {
+                let response = self
+                    .auth_request(Method::PUT, "verify/trusteddevice/securitycode", None)
+                    .await?;
+                ensure!(
+                    response.status().is_success(),
+                    "请求验证码失败（HTTP {}）",
+                    response.status().as_u16()
+                );
+            }
+            let code = input(AuthInput::Code)?;
             ensure!(
                 code.len() == 6 && code.bytes().all(|c| c.is_ascii_digit()),
                 "验证码须为六位数字"

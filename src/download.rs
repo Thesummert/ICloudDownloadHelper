@@ -274,6 +274,7 @@ mod tests {
             url,
             size: 6,
             fingerprint: "v1".into(),
+            preview_url: None,
         }
     }
 

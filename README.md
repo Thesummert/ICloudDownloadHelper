@@ -16,7 +16,7 @@ Rust 编写的跨平台 iCloud 照片命令行下载工具，独立登录 Apple 
 
 ## 编译
 
-需要 Rust 1.91 或更高版本。支持 macOS、Windows 和 Linux，HTTPS 使用 rustls。
+需要 Rust 1.92 或更高版本。支持 macOS、Windows 和 Linux，HTTPS 使用 rustls。
 
 ```sh
 cargo build --release --locked
@@ -25,8 +25,20 @@ cargo build --release --locked
 产物为 `target/release/icloud-dl`（Windows 为 `icloud-dl.exe`）。也可在项目目录中安装到 Cargo bin 目录：
 
 ```sh
-cargo install --path . --locked
+cargo install --path . --locked --bin icloud-dl
 ```
+
+## 图形界面
+
+使用 Slint 图形界面登录、选择个人相册、分页预览缩略图，并下载所选相册的原始文件：
+
+```sh
+cargo run --release --locked --features gui --bin icloud-dl-gui
+```
+
+输入 Apple 账号、选择 `com` 或 `cn` 并连接；需要时在窗口中输入密码和受信任设备验证码。选择相册后加载一页预览，点击“下一页”继续；底部可填写下载目录并下载当前相册。图形下载沿用命令行的会话、文件锁、续传和校验规则，当前按文件顺序下载，不包含 Live Photo 的伴随视频。预览使用 Apple 提供的缩略图，缺少预览资源时只显示文件名；视频不支持播放。界面不保存密码。
+
+图形界面依赖 Slint，其许可条款与本项目 MIT 许可不同；分发带图形界面的程序前请确认适用的 [Slint 许可](https://slint.dev/pricing)。
 
 ## 快速开始
 
