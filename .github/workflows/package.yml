@@ -1,0 +1,29 @@
+name: Package
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            script: ./scripts/package-linux.sh
+          - os: macos-14
+            script: ./scripts/package-macos.sh
+          - os: windows-2022
+            script: ./scripts/package-windows.ps1
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libx11-xcb-dev libxcursor-dev libxkbcommon-x11-dev libx11-dev
+      - name: Build package
+        shell: pwsh
+        run: ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error

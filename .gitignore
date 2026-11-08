@@ -2,3 +2,5 @@
 /.icloud-session/
 *.part
 *.part-*
+/dist/
+/**/.DS_Store

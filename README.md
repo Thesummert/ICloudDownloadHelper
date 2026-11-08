@@ -28,6 +28,27 @@ cargo build --release --locked
 cargo install --path . --locked --bin icloud-dl
 ```
 
+## 打包
+
+在目标系统上安装 Rust 1.92 或更高版本，并在仓库根目录运行对应脚本：
+
+```sh
+# macOS：生成包含图形 .app 和命令行程序的 zip
+./scripts/package-macos.sh
+
+# Linux：生成包含图形界面和命令行程序的 tar.gz
+./scripts/package-linux.sh
+```
+
+```powershell
+# Windows PowerShell：需要 MSVC Rust 工具链和 Visual Studio C++ 构建工具
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+```
+
+压缩包输出到 `dist/`，文件名包含版本和构建机器的 Rust 目标架构。每个包包含 `README.md`、`LICENSE` 和 `THIRD_PARTY_NOTICES.md`。脚本仅构建当前主机架构，不生成跨架构或通用二进制。macOS 的 `.app` 不包含开发者签名或公证；Windows 程序也未签名。
+
+Linux 上构建图形界面需要系统开发库。Debian/Ubuntu 可安装 `pkg-config libfontconfig-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libx11-xcb-dev libxcursor-dev libxkbcommon-x11-dev libx11-dev`。运行时需要兼容构建环境的系统库，以及 X11 或 Wayland 桌面；压缩包不是包含所有系统依赖的 AppImage。图形程序的 Slint 许可适用于分发包，请在分发前确认下方许可说明。
+
 ## 图形界面
 
 使用 Slint 图形界面登录、选择个人相册、分页预览缩略图，并下载所选相册的原始文件：
