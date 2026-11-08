@@ -7,7 +7,16 @@ mod srp;
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
 use slint::{ComponentHandle, Model, ModelRc, SharedPixelBuffer, SharedString, VecModel};
-use std::{collections::HashSet, path::PathBuf, sync::mpsc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 slint::slint! {
     import { Button, LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
@@ -25,6 +34,7 @@ slint::slint! {
         in-out property <[PhotoItem]> photos;
         in-out property <bool> connected: false;
         in-out property <bool> busy: false;
+        in-out property <bool> downloading: false;
         in-out property <bool> needs-secret: false;
         in-out property <bool> code-mode: false;
         in-out property <bool> can-next: false;
@@ -56,7 +66,7 @@ slint::slint! {
                     ScrollView {
                         VerticalLayout {
                             for album[index] in root.albums: Button {
-                                text: album; enabled: !root.busy;
+                                text: album; enabled: root.connected && !root.downloading;
                                 clicked => { root.select-album(index); }
                             }
                         }
@@ -88,8 +98,8 @@ slint::slint! {
 }
 
 enum Command {
-    Select(usize),
-    Next,
+    Select(usize, u64),
+    Next(u64),
     Download(PathBuf),
 }
 
@@ -102,13 +112,15 @@ fn status(ui: &slint::Weak<App>, message: String, busy: bool) {
 
 fn main() -> Result<()> {
     let app = App::new()?;
-    let (commands_tx, commands_rx) = mpsc::channel();
+    let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
+    let generation = Arc::new(AtomicU64::new(0));
     let (secret_tx, secret_rx) = mpsc::channel::<String>();
     let weak = app.as_weak();
     app.on_submit_secret(move |value| {
         let _ = secret_tx.send(value.to_string());
     });
     let worker_ui = weak.clone();
+    let worker_generation = generation.clone();
     app.on_connect(move |username, region| {
         let username = username.to_string();
         if username.trim().is_empty() {
@@ -117,6 +129,7 @@ fn main() -> Result<()> {
         }
         let region = region.to_string();
         let ui = worker_ui.clone();
+        let generation = worker_generation.clone();
         // A single worker owns the session and receives subsequent UI actions.
         // The receiver is consumed once because the UI permits one connection per window.
         let rx = COMMAND_RECEIVER.with(|slot| slot.borrow_mut().take());
@@ -128,7 +141,14 @@ fn main() -> Result<()> {
             let result = tokio::runtime::Runtime::new()
                 .context("无法创建后台运行时")
                 .and_then(|rt| {
-                    rt.block_on(worker(ui.clone(), username, region, commands, secrets))
+                    rt.block_on(worker(
+                        ui.clone(),
+                        username,
+                        region,
+                        commands,
+                        secrets,
+                        generation,
+                    ))
                 });
             if let Err(e) = result {
                 let message = format!("错误：{e:#}。请关闭窗口后重试。");
@@ -143,18 +163,35 @@ fn main() -> Result<()> {
     COMMAND_RECEIVER.with(|slot| *slot.borrow_mut() = Some((commands_rx, secret_rx)));
     let tx = commands_tx.clone();
     let ui = weak.clone();
+    let selection_generation = generation.clone();
     app.on_select_album(move |index| {
-        status(&ui, "正在读取相册…".into(), true);
-        let _ = tx.send(Command::Select(index as usize));
+        let current = selection_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(app) = ui.upgrade() {
+            if let Some(name) = app.get_albums().row_data(index as usize) {
+                app.set_selected(name);
+            }
+            app.set_photos(ModelRc::new(VecModel::<PhotoItem>::default()));
+            app.set_can_next(false);
+            app.set_busy(true);
+            app.set_status("正在读取相册…".into());
+        }
+        let _ = tx.send(Command::Select(index as usize, current));
     });
     let tx = commands_tx.clone();
     let ui = weak.clone();
     app.on_next_page(move || {
-        status(&ui, "正在读取下一页…".into(), true);
-        let _ = tx.send(Command::Next);
+        let current = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(app) = ui.upgrade() {
+            app.set_status("正在读取下一页…".into());
+            app.set_busy(true);
+        }
+        let _ = tx.send(Command::Next(current));
     });
     let ui = weak.clone();
     app.on_download_album(move |dir| {
+        if let Some(app) = ui.upgrade() {
+            app.set_downloading(true);
+        }
         status(&ui, "正在下载相册…".into(), true);
         let _ = commands_tx.send(Command::Download(PathBuf::from(dir.as_str())));
     });
@@ -162,14 +199,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-thread_local! { static COMMAND_RECEIVER: std::cell::RefCell<Option<(mpsc::Receiver<Command>, mpsc::Receiver<String>)>> = const { std::cell::RefCell::new(None) }; }
+thread_local! { static COMMAND_RECEIVER: std::cell::RefCell<Option<(tokio::sync::mpsc::UnboundedReceiver<Command>, mpsc::Receiver<String>)>> = const { std::cell::RefCell::new(None) }; }
 
 async fn worker(
     ui: slint::Weak<App>,
     username: String,
     region: String,
-    commands: mpsc::Receiver<Command>,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<Command>,
     secrets: mpsc::Receiver<String>,
+    generation: Arc<AtomicU64>,
 ) -> Result<()> {
     let dir = directories::ProjectDirs::from("", "", "icloud-download-helper")
         .context("无法定位配置目录")?
@@ -215,32 +253,87 @@ async fn worker(
         .build()?;
     let mut selected: Option<usize> = None;
     let mut offset = 0;
-    while let Ok(command) = commands.recv() {
-        let result: Result<()> = async {
-            match command {
-                Command::Select(index) => {
-                    ensure!(index < albums.len(), "无效的相册");
-                    selected = Some(index);
-                    offset = 0;
-                    show_page(&ui, &photos, &client, &albums[index], &mut offset).await?;
+    let mut pending = None;
+    loop {
+        let command = match pending.take() {
+            Some(command) => command,
+            None => match commands.recv().await {
+                Some(command) => command,
+                None => break,
+            },
+        };
+        match command {
+            Command::Select(_, current) | Command::Next(current)
+                if generation.load(Ordering::SeqCst) != current =>
+            {
+                continue;
+            }
+            Command::Select(index, current) => {
+                if index >= albums.len() {
+                    page_status(&ui, &generation, current, "无效的相册".into(), false);
+                    continue;
                 }
-                Command::Next => {
-                    let index = selected.context("请选择相册")?;
-                    show_page(&ui, &photos, &client, &albums[index], &mut offset).await?;
-                }
-                Command::Download(dir) => {
-                    let index = selected.context("请选择相册")?;
-                    download_album(&ui, &photos, &client, &albums[index], dir).await?;
+                selected = Some(index);
+                offset = 0;
+                tokio::select! {
+                    next = commands.recv() => { if let Some(next) = next { pending = Some(next); } else { break; } }
+                    result = show_page(&ui, &photos, &client, &albums[index], &mut offset, &generation, current) => {
+                        if let Err(e) = result { page_status(&ui, &generation, current, format!("错误：{e:#}"), false); }
+                    }
                 }
             }
-            Ok(())
-        }
-        .await;
-        if let Err(e) = result {
-            status(&ui, format!("错误：{e:#}"), false);
+            Command::Next(current) => {
+                let Some(index) = selected else {
+                    page_status(&ui, &generation, current, "请选择相册".into(), false);
+                    continue;
+                };
+                tokio::select! {
+                    next = commands.recv() => { if let Some(next) = next { pending = Some(next); } else { break; } }
+                    result = show_page(&ui, &photos, &client, &albums[index], &mut offset, &generation, current) => {
+                        if let Err(e) = result { page_status(&ui, &generation, current, format!("错误：{e:#}"), false); }
+                    }
+                }
+            }
+            Command::Download(dir) => {
+                let result = match selected {
+                    Some(index) => download_album(&ui, &photos, &client, &albums[index], dir).await,
+                    None => Err(anyhow::anyhow!("请选择相册")),
+                };
+                let _ = ui.upgrade_in_event_loop(|app| app.set_downloading(false));
+                if let Err(e) = result {
+                    status(&ui, format!("错误：{e:#}"), false);
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn page_update(
+    ui: &slint::Weak<App>,
+    generation: &Arc<AtomicU64>,
+    current: u64,
+    update: impl FnOnce(App) + Send + 'static,
+) {
+    let generation = generation.clone();
+    let _ = ui.upgrade_in_event_loop(move |app| {
+        if generation.load(Ordering::SeqCst) == current {
+            update(app);
+        }
+    });
+}
+
+fn page_status(
+    ui: &slint::Weak<App>,
+    generation: &Arc<AtomicU64>,
+    current: u64,
+    message: String,
+    busy: bool,
+) {
+    page_update(ui, generation, current, move |app| {
+        app.set_status(message.into());
+        app.set_busy(busy);
+    });
 }
 
 async fn show_page(
@@ -249,10 +342,12 @@ async fn show_page(
     client: &reqwest::Client,
     album: &photos::Album,
     offset: &mut u64,
+    generation: &Arc<AtomicU64>,
+    current: u64,
 ) -> Result<()> {
     let page = photos.page(Some(album), *offset, false).await?;
     if page.empty {
-        let _ = ui.upgrade_in_event_loop(|app| {
+        page_update(ui, generation, current, |app| {
             app.set_can_next(false);
             app.set_busy(false);
             app.set_status("已到相册末尾".into());
@@ -262,7 +357,7 @@ async fn show_page(
     *offset += page.masters as u64;
     let count = page.media.len();
     let name = album.name.clone();
-    let _ = ui.upgrade_in_event_loop(move |app| {
+    page_update(ui, generation, current, move |app| {
         app.set_selected(name.into());
         app.set_photos(ModelRc::new(VecModel::<PhotoItem>::default()));
         app.set_status(format!("正在加载 {count} 张预览…").into());
@@ -273,7 +368,7 @@ async fn show_page(
             None => None,
         };
         let name = media.filename;
-        let _ = ui.upgrade_in_event_loop(move |app| {
+        page_update(ui, generation, current, move |app| {
             if let Some(model) = app
                 .get_photos()
                 .as_any()
@@ -294,7 +389,7 @@ async fn show_page(
         });
     }
     let position = *offset;
-    let _ = ui.upgrade_in_event_loop(move |app| {
+    page_update(ui, generation, current, move |app| {
         app.set_busy(false);
         app.set_can_next(true);
         app.set_status(format!("已读取 {position} 项；没有缩略图的项目仅显示文件名").into());
